@@ -166,206 +166,89 @@ def sbo(prob, rng, n_pop=30, alpha=0.94, p_mut=0.05, z=0.02):
 
 # ------------------------------------------------------------------------- QPSBO
 def qpsbo(prob, rng, n_pop=30, alpha=0.94, p_mut=0.05, z=0.02,
-          beta_max=1.0, beta_min=0.5, d_theta=0.05 * np.pi, p_parity=0.5):
+          beta_max=1.0, beta_min=0.5, d_theta=0.05 * np.pi, p_parity=0.75):
     """Quantum Parity Satin Bowerbird Optimizer (proposed).
 
     Three changes to SBO:
     1. Qubit register: each bird carries a qubit angle theta per dimension.
        Measuring it (P(|1>) = sin^2 theta) decides, dimension by dimension,
        whether the bird uses the classic SBO bower move (|0>, exploitation)
-       or a quantum delta-potential-well jump (|1>, exploration).
-
+       or a quantum delta-potential-well jump (|1>, exploration):
+           x = p +/- beta * |mbest - x| * ln(1/u)
+       where p mixes the bird's own (retained) bower with the elite bower and
+       mbest is the mean bower of the colony.
     2. Quantum rotation gate: after evaluation, birds that improved rotate
        theta towards |0> (exploit more); birds that stagnated rotate towards
-       |1> (explore more).
-
-    3. Adaptive parity operator: the worse half of the colony is reflected
-       through the elite bower. Parity is applied more strongly early in the
-       search and gradually reduced as the optimizer converges.
+       |1> (explore more). Theta stays inside [0.05, pi/2 - 0.05].
+    3. Parity operator: the worse half of the colony is reflected through
+       the elite bower (spatial-parity inversion with a random contraction),
+           x_par = elite + r * (elite - x),
+       and the better of x / x_par survives. This gives every weak bird an
+       "opposite" look at the search space around the best solution.
+    The extra parity evaluations are charged to the same FE budget.
     """
-
     d, lb, ub = prob.dim, prob.lb, prob.ub
     sigma = z * (ub - lb)
-
     th_lo, th_hi = 0.05, np.pi / 2 - 0.05
-
     X = rng.uniform(lb, ub, (n_pop, d))
     F = prob.evaluate(X)
-
-    # Each bird has its own quantum state
-    theta = np.full((n_pop, d), np.pi / 4)
-
+    theta = np.full((n_pop, d), np.pi / 4)           # equal superposition
     T = max(1, prob.max_fe // int(n_pop * (1 + p_parity / 2)))
     t = 0
-
     while not prob.done:
-
-        # Gradually move from exploration to exploitation
-        progress = min(t / T, 1.0)
-
-        beta = beta_max - (beta_max - beta_min) * progress
-
-        # Adaptive parity probability:
-        # high at the beginning, lower near convergence
-        current_p_parity = p_parity * (1.0 - 0.5 * progress)
-
+        beta = beta_max - (beta_max - beta_min) * min(t / T, 1.0)
         P = _sbo_probs(F)
-
         e = np.argmin(F)
         elite = X[e].copy()
+        mbest = X.mean(axis=0)                     # mean best bower (colony keeps only best bowers)
 
-        # Mean position of the population
-        mbest = X.mean(axis=0)
-
-        # ---------------------------------------------------------
-        # 1. Quantum measurement + hybrid SBO movement
-        # ---------------------------------------------------------
-
+        # --- 1. measure qubits and build the hybrid move
         bits = rng.random((n_pop, d)) < np.sin(theta) ** 2
-
-        tgt = rng.choice(
-            n_pop,
-            size=(n_pop, d),
-            p=P
-        )
-
+        tgt = rng.choice(n_pop, size=(n_pop, d), p=P)
         lam = alpha / (1.0 + P[tgt])
-
         Xt = X[tgt, np.arange(d)]
-
-        # Classical SBO movement
         classic = X + lam * ((Xt + elite) / 2.0 - X)
-
-        # Quantum exploration movement
         phi = rng.random((n_pop, d))
-
-        attractor = (
-            phi * X +
-            (1 - phi) * elite
-        )
-
+        attractor = phi * X + (1 - phi) * elite
         u = rng.random((n_pop, d)) + 1e-12
-
-        sgn = np.where(
-            rng.random((n_pop, d)) < 0.5,
-            -1.0,
-            1.0
-        )
-
-        quantum = (
-            attractor
-            + sgn
-            * beta
-            * np.abs(mbest - X)
-            * np.log(1.0 / u)
-        )
-
-        # Select classical or quantum movement
+        sgn = np.where(rng.random((n_pop, d)) < 0.5, -1.0, 1.0)
+        quantum = attractor + sgn * beta * np.abs(mbest - X) * np.log(1.0 / u)
         Xnew = np.where(bits, quantum, classic)
-
-        # Mutation
         mut = rng.random((n_pop, d)) < p_mut
-
-        Xnew[mut] += (
-            sigma *
-            rng.standard_normal(mut.sum())
-        )
-
+        Xnew[mut] += sigma * rng.standard_normal(mut.sum())
         Xnew = prob.clip(Xnew)
-
         Fnew = prob.evaluate(Xnew)
 
-        # ---------------------------------------------------------
-        # 2. Quantum rotation gate
-        # ---------------------------------------------------------
-
-        # Preserve the quantum state of the old population
+        # --- 2. quantum rotation gate
+        # Keep the quantum state attached to the corresponding bird.
         theta_old = theta.copy()
-
-        # New quantum states for the newly generated population
         theta_new = theta_old.copy()
 
         improved = Fnew < F
-
-        # Improved birds -> more exploitation
         theta_new[improved] -= d_theta
-
-        # Non-improved birds -> more exploration
         theta_new[~improved] += d_theta
+        theta_new = np.clip(theta_new, th_lo, th_hi)
 
-        theta_new = np.clip(
-            theta_new,
-            th_lo,
-            th_hi
-        )
-
-        # ---------------------------------------------------------
-        # 3. Elitist population update
-        # ---------------------------------------------------------
-
-        Xa = np.vstack([
-            X,
-            Xnew
-        ])
-
-        Fa = np.concatenate([
-            F,
-            Fnew
-        ])
-
-        # Keep the quantum state attached to its corresponding bird
-        Ta = np.vstack([
-            theta_old,
-            theta_new
-        ])
+        # merge (elitist, as in SBO)
+        Xa = np.vstack([X, Xnew])
+        Fa = np.concatenate([F, Fnew])
+        Ta = np.vstack([theta_old, theta_new])
 
         keep = np.argsort(Fa)[:n_pop]
+        X, F, theta = Xa[keep], Fa[keep], Ta[keep]
 
-        X = Xa[keep]
-        F = Fa[keep]
-        theta = Ta[keep]
-
-        # ---------------------------------------------------------
-        # 4. Adaptive parity operator
-        # ---------------------------------------------------------
-
+        # --- 3. parity operator on the worse half
         if not prob.done:
-
             elite = X[0]
-
-            # Worst half of the population
-            worst = np.arange(
-                n_pop // 2,
-                n_pop
-            )
-
-            # Apply parity more strongly early in the search
-            sel = worst[
-                rng.random(len(worst)) < current_p_parity
-            ]
-
+            worst = np.arange(n_pop // 2, n_pop)
+            sel = worst[rng.random(len(worst)) < p_parity]
             if len(sel):
-
-                r = rng.random(
-                    (len(sel), d)
-                )
-
-                # Reflection around the elite solution
-                Xp = prob.clip(
-                    elite +
-                    r * (elite - X[sel])
-                )
-
+                r = rng.random((len(sel), d))
+                Xp = prob.clip(elite + r * (elite - X[sel]))
                 Fp = prob.evaluate(Xp)
-
-                # Keep whichever solution is better
                 better = Fp < F[sel]
-
-                X[sel[better]] = Xp[better]
-                F[sel[better]] = Fp[better]
-
+                X[sel[better]], F[sel[better]] = Xp[better], Fp[better]
         t += 1
-
     return prob
 
 
