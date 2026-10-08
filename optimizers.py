@@ -220,14 +220,20 @@ def qpsbo(prob, rng, n_pop=30, alpha=0.94, p_mut=0.05, z=0.02,
         Fnew = prob.evaluate(Xnew)
 
         # --- 2. quantum rotation gate
+        # Keep the quantum state attached to the corresponding bird.
+        theta_old = theta.copy()
+        theta_new = theta_old.copy()
+
         improved = Fnew < F
-        theta[improved] -= d_theta
-        theta[~improved] += d_theta
-        theta = np.clip(theta, th_lo, th_hi)
+        theta_new[improved] -= d_theta
+        theta_new[~improved] += d_theta
+        theta_new = np.clip(theta_new, th_lo, th_hi)
 
         # merge (elitist, as in SBO)
-        Xa, Fa = np.vstack([X, Xnew]), np.concatenate([F, Fnew])
-        Ta = np.vstack([theta, theta])
+        Xa = np.vstack([X, Xnew])
+        Fa = np.concatenate([F, Fnew])
+        Ta = np.vstack([theta_old, theta_new])
+
         keep = np.argsort(Fa)[:n_pop]
         X, F, theta = Xa[keep], Fa[keep], Ta[keep]
 
