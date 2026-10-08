@@ -1,0 +1,24 @@
+# ---- Raw CHB-MIT EEG dataset (several GB, download from PhysioNet) ----
+CHB-MIT/
+chb-mit/
+chbmit/
+# safety net: raw EDF recordings and their annotation files anywhere in the repo
+*.edf
+*.edf.seizures
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# ---- Virtual environments ----
+venv/
+.venv/
+env/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
